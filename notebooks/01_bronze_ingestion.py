@@ -1,98 +1,107 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # 01 — Bronze: Ingestão do CSV (Volume → Delta)
+# MAGIC # 01 — Bronze: Ingestão do CSV de Mobilidade (Volume → Delta)
 # MAGIC
-# MAGIC **O que este notebook faz:**
-# MAGIC - Lê CSV(s) do Volume (`/Volumes/<catalog>/bronze/raw_csv/`)
-# MAGIC - Adiciona colunas de auditoria (arquivo de origem, timestamp de carga, hash da linha)
-# MAGIC - Grava em Delta Table na camada Bronze (append idempotente: mesma carga não duplica)
+# MAGIC **Schema de origem:**
+# MAGIC `day, cod_municipio, nm_dist, cod_cidade_moradia, cod_distrito_moradia,`
+# MAGIC `cod_cidade_trabalho, dia_semana, faixa_duracao, tipo, genero, faixa_idade,`
+# MAGIC `renda, permanencia_minutos, pernoites_banda_regiao, pernoites_reg, personas, home, work, qtd`
+
+# COMMAND ----------
+
+dbutils.widgets.text("catalog",    "data_monetization", "Catalog")
+dbutils.widgets.text("table_name", "mobilidade_raw",    "Tabela Bronze")
+dbutils.widgets.text("separator",  "\t",                "Separador (TAB=\\t  vírgula=,  ponto-e-vírgula=;)")
+
+CATALOG    = dbutils.widgets.get("catalog")
+TABLE_NAME = dbutils.widgets.get("table_name")
+SEPARATOR  = dbutils.widgets.get("separator")
+
+VOLUME_PATH   = f"/Volumes/{CATALOG}/bronze/raw_csv"
+BRONZE_TABLE  = f"{CATALOG}.bronze.{TABLE_NAME}"
+
+print(f"Volume  : {VOLUME_PATH}")
+print(f"Destino : {BRONZE_TABLE}")
+print(f"Sep     : repr={repr(SEPARATOR)}")
+
+# COMMAND ----------
+
+# MAGIC %md ## 1. Listar arquivos no Volume
+
+# COMMAND ----------
+
+display(dbutils.fs.ls(VOLUME_PATH))
+
+# COMMAND ----------
+
+# MAGIC %md ## 2. Ler CSV com schema explícito
 # MAGIC
-# MAGIC **Camada:** Bronze — dado cru, sem transformação, para rastreabilidade total.
+# MAGIC Schema fixo para evitar erros de inferência em colunas numéricas/string mistas.
 
 # COMMAND ----------
 
-# MAGIC %md ## Configuração (widgets — edite aqui antes de rodar)
-
-# COMMAND ----------
-
-dbutils.widgets.text("catalog", "data_monetization", "Catalog")
-dbutils.widgets.text("bronze_schema", "bronze", "Schema Bronze")
-dbutils.widgets.text("table_name", "events_raw", "Nome da tabela Bronze")
-dbutils.widgets.text("separator", ",", "Separador CSV (, ou ;)")
-
-CATALOG       = dbutils.widgets.get("catalog")
-BRONZE_SCHEMA = dbutils.widgets.get("bronze_schema")
-TABLE_NAME    = dbutils.widgets.get("table_name")
-SEPARATOR     = dbutils.widgets.get("separator")
-
-VOLUME_PATH   = f"/Volumes/{CATALOG}/{BRONZE_SCHEMA}/raw_csv"
-BRONZE_TABLE  = f"{CATALOG}.{BRONZE_SCHEMA}.{TABLE_NAME}"
-
-print(f"Volume de origem : {VOLUME_PATH}")
-print(f"Tabela de destino: {BRONZE_TABLE}")
-
-# COMMAND ----------
-
-# MAGIC %md ## 1. Descobrir arquivos disponíveis no Volume
-
-# COMMAND ----------
-
-import os
 from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StructType, StructField, StringType, IntegerType, LongType, DoubleType, DateType
+)
 
-files_in_volume = dbutils.fs.ls(VOLUME_PATH)
-display(files_in_volume)
-
-# COMMAND ----------
-
-# MAGIC %md ## 2. Ler todos os CSVs do Volume
-
-# COMMAND ----------
+SCHEMA = StructType([
+    StructField("day",                    StringType(),  True),
+    StructField("cod_municipio",          StringType(),  True),
+    StructField("nm_dist",                StringType(),  True),
+    StructField("cod_cidade_moradia",     StringType(),  True),
+    StructField("cod_distrito_moradia",   StringType(),  True),
+    StructField("cod_cidade_trabalho",    StringType(),  True),
+    StructField("dia_semana",             StringType(),  True),
+    StructField("faixa_duracao",          StringType(),  True),
+    StructField("tipo",                   StringType(),  True),
+    StructField("genero",                 StringType(),  True),
+    StructField("faixa_idade",            StringType(),  True),
+    StructField("renda",                  StringType(),  True),
+    StructField("permanencia_minutos",    DoubleType(),  True),
+    StructField("pernoites_banda_regiao", StringType(),  True),
+    StructField("pernoites_reg",          DoubleType(),  True),
+    StructField("personas",               StringType(),  True),
+    StructField("home",                   StringType(),  True),
+    StructField("work",                   StringType(),  True),
+    StructField("qtd",                    LongType(),    True),
+])
 
 df_raw = (
     spark.read
     .option("header", "true")
-    .option("inferSchema", "true")
     .option("sep", SEPARATOR)
     .option("encoding", "UTF-8")
+    .option("quote", '"')
+    .schema(SCHEMA)
     .csv(VOLUME_PATH)
 )
 
-print(f"Linhas lidas: {df_raw.count()}")
-print(f"Colunas detectadas: {df_raw.columns}")
+print(f"Linhas lidas : {df_raw.count()}")
 df_raw.printSchema()
+display(df_raw.limit(10))
 
 # COMMAND ----------
 
-# MAGIC %md ## 3. Adicionar colunas de auditoria (metadados de carga)
+# MAGIC %md ## 3. Adicionar metadados de auditoria
 
 # COMMAND ----------
 
 df_bronze = (
     df_raw
-    # Arquivo CSV de origem (rastreabilidade por linha)
-    .withColumn("_source_file", F.input_file_name())
-    # Timestamp de quando esse batch foi carregado
-    .withColumn("_ingested_at", F.current_timestamp())
-    # Hash MD5 da linha completa — para dedup na Silver sem precisar de chave natural
-    .withColumn(
-        "_row_hash",
+    .withColumn("_source_file",  F.input_file_name())
+    .withColumn("_ingested_at",  F.current_timestamp())
+    .withColumn("_row_hash",
         F.md5(F.concat_ws("|", *[F.col(c).cast("string") for c in df_raw.columns]))
     )
 )
 
-display(df_bronze.limit(5))
+# COMMAND ----------
+
+# MAGIC %md ## 4. Gravar na Bronze (idempotente via MERGE no _row_hash)
 
 # COMMAND ----------
 
-# MAGIC %md ## 4. Gravar na Bronze Delta Table (merge/idempotência)
-# MAGIC
-# MAGIC Usamos `_row_hash` como chave de dedup: se você rodar este notebook duas vezes
-# MAGIC com o mesmo arquivo, nenhuma linha será duplicada.
-
-# COMMAND ----------
-
-# Cria a tabela se não existir (primeira vez), depois faz MERGE para evitar duplicata
 spark.sql(f"USE CATALOG {CATALOG}")
 
 if not spark.catalog.tableExists(BRONZE_TABLE):
@@ -103,30 +112,24 @@ if not spark.catalog.tableExists(BRONZE_TABLE):
         .option("overwriteSchema", "true")
         .saveAsTable(BRONZE_TABLE)
     )
-    print(f"Tabela {BRONZE_TABLE} criada com {df_bronze.count()} linhas.")
+    print(f"Tabela criada: {BRONZE_TABLE} — {df_bronze.count()} linhas")
 else:
-    # Merge: insere só linhas com hash ainda não presente
-    df_bronze.createOrReplaceTempView("_bronze_staging")
+    df_bronze.createOrReplaceTempView("_staging")
     spark.sql(f"""
-        MERGE INTO {BRONZE_TABLE} AS target
-        USING _bronze_staging AS source
-        ON target._row_hash = source._row_hash
+        MERGE INTO {BRONZE_TABLE} AS t
+        USING _staging AS s
+        ON t._row_hash = s._row_hash
         WHEN NOT MATCHED THEN INSERT *
     """)
-    print(f"Merge concluído em {BRONZE_TABLE}.")
+    print(f"Merge concluído em {BRONZE_TABLE}")
 
 # COMMAND ----------
 
-# MAGIC %md ## 5. Validação rápida
+# MAGIC %md ## 5. Validação
 
 # COMMAND ----------
 
 total = spark.table(BRONZE_TABLE).count()
-print(f"Total de linhas na Bronze agora: {total}")
+print(f"Total na Bronze: {total:,} linhas")
 
-spark.sql(f"DESCRIBE DETAIL {BRONZE_TABLE}").select(
-    "name", "numFiles", "sizeInBytes"
-).display()
-
-# Histórico de versões Delta (time travel)
-spark.sql(f"DESCRIBE HISTORY {BRONZE_TABLE} LIMIT 5").display()
+spark.sql(f"DESCRIBE HISTORY {BRONZE_TABLE} LIMIT 3").display()

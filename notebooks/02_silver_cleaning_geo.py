@@ -2,138 +2,135 @@
 # MAGIC %md
 # MAGIC # 02 — Silver: Limpeza, Tipagem e Enriquecimento Geográfico
 # MAGIC
-# MAGIC **O que este notebook faz:**
-# MAGIC - Lê da Bronze (Delta), aplica regras de qualidade e limpeza
-# MAGIC - Padroniza colunas geográficas (cidade, UF, lat/lon)
-# MAGIC - Enriquece com coluna de Região (Norte/Sul/etc.) a partir da UF
-# MAGIC - Grava em Delta Table na camada Silver
-# MAGIC
-# MAGIC **Ajuste a seção "Mapeamento de colunas" para bater com seu CSV real.**
+# MAGIC **Transformações aplicadas:**
+# MAGIC - Converte `day` para DateType
+# MAGIC - Limpa strings (trim, uppercase onde aplicável)
+# MAGIC - Deriva `uf` e `regiao` a partir de tabela de referência IBGE por `cod_municipio`
+# MAGIC - Adiciona `is_home_trip` / `is_work_trip` como boolean
+# MAGIC - Flag de qualidade por linha
 
 # COMMAND ----------
 
-# MAGIC %md ## Configuração
-
-# COMMAND ----------
-
-dbutils.widgets.text("catalog",        "data_monetization", "Catalog")
-dbutils.widgets.text("bronze_table",   "events_raw",        "Tabela Bronze (origem)")
-dbutils.widgets.text("silver_table",   "events",            "Tabela Silver (destino)")
-# Nomes das colunas geográficas no SEU CSV — ajuste aqui:
-dbutils.widgets.text("col_city",  "city",      "Coluna: cidade")
-dbutils.widgets.text("col_state", "state",     "Coluna: UF/estado")
-dbutils.widgets.text("col_lat",   "latitude",  "Coluna: latitude")
-dbutils.widgets.text("col_lon",   "longitude", "Coluna: longitude")
+dbutils.widgets.text("catalog",      "data_monetization", "Catalog")
+dbutils.widgets.text("bronze_table", "mobilidade_raw",    "Tabela Bronze")
+dbutils.widgets.text("silver_table", "mobilidade",        "Tabela Silver")
 
 CATALOG       = dbutils.widgets.get("catalog")
 BRONZE_TABLE  = f"{CATALOG}.bronze.{dbutils.widgets.get('bronze_table')}"
 SILVER_TABLE  = f"{CATALOG}.silver.{dbutils.widgets.get('silver_table')}"
-COL_CITY      = dbutils.widgets.get("col_city")
-COL_STATE     = dbutils.widgets.get("col_state")
-COL_LAT       = dbutils.widgets.get("col_lat")
-COL_LON       = dbutils.widgets.get("col_lon")
 
 print(f"Origem : {BRONZE_TABLE}")
 print(f"Destino: {SILVER_TABLE}")
 
 # COMMAND ----------
 
-# MAGIC %md ## 1. Ler Bronze
-
-# COMMAND ----------
-
 from pyspark.sql import functions as F
-from pyspark.sql.types import DoubleType
+from pyspark.sql.types import DateType
 
 df = spark.table(BRONZE_TABLE)
-print(f"Linhas na Bronze: {df.count()}")
-df.printSchema()
+print(f"Linhas na Bronze: {df.count():,}")
 
 # COMMAND ----------
 
-# MAGIC %md ## 2. Limpeza geral
-# MAGIC
-# MAGIC Ajuste as colunas abaixo para o seu schema real.
-# MAGIC Se uma coluna não existe no seu CSV, comente a linha correspondente.
+# MAGIC %md ## 1. Limpeza e tipagem
 
 # COMMAND ----------
 
 df_clean = (
     df
-    # Remove linhas completamente nulas (onde TODAS as colunas de negócio são null)
     .dropDuplicates(["_row_hash"])
-    # Normaliza texto de cidade e UF: trim + uppercase
-    .withColumn(COL_CITY,  F.upper(F.trim(F.col(COL_CITY))))
-    .withColumn(COL_STATE, F.upper(F.trim(F.col(COL_STATE))))
-    # Garante que lat/lon são Double (inferSchema às vezes os lê como String)
-    .withColumn(COL_LAT, F.col(COL_LAT).cast(DoubleType()))
-    .withColumn(COL_LON, F.col(COL_LON).cast(DoubleType()))
+    # Data: converte string para DateType (aceita formatos YYYY-MM-DD e YYYYMMDD)
+    .withColumn("day", F.to_date(F.col("day")))
+    # Strings: trim em todos os campos categóricos
+    .withColumn("nm_dist",      F.trim(F.col("nm_dist")))
+    .withColumn("tipo",         F.trim(F.upper(F.col("tipo"))))
+    .withColumn("genero",       F.trim(F.upper(F.col("genero"))))
+    .withColumn("faixa_idade",  F.trim(F.col("faixa_idade")))
+    .withColumn("renda",        F.trim(F.col("renda")))
+    .withColumn("dia_semana",   F.trim(F.col("dia_semana")))
+    .withColumn("faixa_duracao",F.trim(F.col("faixa_duracao")))
+    .withColumn("personas",     F.trim(F.col("personas")))
+    # Booleanos derivados
+    .withColumn("is_home_trip", F.col("home").isin("1","true","True","S","s","sim"))
+    .withColumn("is_work_trip", F.col("work").isin("1","true","True","S","s","sim"))
+    # Flag de qualidade: qtd não pode ser nulo ou negativo
+    .withColumn("is_valid", F.col("qtd").isNotNull() & (F.col("qtd") >= 0))
 )
 
 # COMMAND ----------
 
-# MAGIC %md ## 3. Enriquecimento geográfico: Região por UF
+# MAGIC %md ## 2. Enriquecimento Geográfico: UF e Região por cod_municipio (IBGE)
+# MAGIC
+# MAGIC Os dois primeiros dígitos do código IBGE de município identificam o estado.
+# MAGIC Isso dispensa join com tabela externa — derivamos UF diretamente do código.
 
 # COMMAND ----------
 
-# Mapa UF -> Região (Brasil). Adapte ou remova se seu dado não for brasileiro.
-UF_TO_REGION = {
-    "AC":"Norte","AP":"Norte","AM":"Norte","PA":"Norte","RO":"Norte","RR":"Norte","TO":"Norte",
-    "AL":"Nordeste","BA":"Nordeste","CE":"Nordeste","MA":"Nordeste","PB":"Nordeste",
-    "PE":"Nordeste","PI":"Nordeste","RN":"Nordeste","SE":"Nordeste",
-    "DF":"Centro-Oeste","GO":"Centro-Oeste","MT":"Centro-Oeste","MS":"Centro-Oeste",
-    "ES":"Sudeste","MG":"Sudeste","RJ":"Sudeste","SP":"Sudeste",
-    "PR":"Sul","RS":"Sul","SC":"Sul",
+# Mapa dos primeiros 2 dígitos IBGE → UF
+IBGE_PREFIX_TO_UF = {
+    "11":"RO","12":"AC","13":"AM","14":"RR","15":"PA","16":"AP","17":"TO",
+    "21":"MA","22":"PI","23":"CE","24":"RN","25":"PB","26":"PE","27":"AL",
+    "28":"SE","29":"BA",
+    "31":"MG","32":"ES","33":"RJ","35":"SP",
+    "41":"PR","42":"SC","43":"RS",
+    "50":"MS","51":"MT","52":"GO","53":"DF",
 }
 
-mapping_expr = F.create_map([F.lit(x) for pair in UF_TO_REGION.items() for x in pair])
+UF_TO_REGION = {
+    "RO":"Norte","AC":"Norte","AM":"Norte","RR":"Norte","PA":"Norte","AP":"Norte","TO":"Norte",
+    "MA":"Nordeste","PI":"Nordeste","CE":"Nordeste","RN":"Nordeste","PB":"Nordeste",
+    "PE":"Nordeste","AL":"Nordeste","SE":"Nordeste","BA":"Nordeste",
+    "MG":"Sudeste","ES":"Sudeste","RJ":"Sudeste","SP":"Sudeste",
+    "PR":"Sul","SC":"Sul","RS":"Sul",
+    "MS":"Centro-Oeste","MT":"Centro-Oeste","GO":"Centro-Oeste","DF":"Centro-Oeste",
+}
+
+ibge_map  = F.create_map([F.lit(x) for pair in IBGE_PREFIX_TO_UF.items() for x in pair])
+region_map = F.create_map([F.lit(x) for pair in UF_TO_REGION.items() for x in pair])
 
 df_geo = (
     df_clean
-    # Coluna de região derivada da UF
-    .withColumn("region", mapping_expr.getItem(F.col(COL_STATE)))
-    # Flag de qualidade: coordenadas válidas?
-    .withColumn(
-        "has_valid_coordinates",
-        F.col(COL_LAT).isNotNull()
-        & F.col(COL_LON).isNotNull()
-        & F.col(COL_LAT).between(-90, 90)
-        & F.col(COL_LON).between(-180, 180)
-    )
-    # Timestamp de processamento Silver
+    .withColumn("ibge_prefix", F.substring(F.col("cod_municipio"), 1, 2))
+    .withColumn("uf",    ibge_map.getItem(F.col("ibge_prefix")))
+    .withColumn("regiao", region_map.getItem(F.col("uf")))
+    .drop("ibge_prefix")
     .withColumn("_processed_at", F.current_timestamp())
 )
 
 # COMMAND ----------
 
-# MAGIC %md ## 4. Relatório de qualidade
+# MAGIC %md ## 3. Relatório de qualidade
 
 # COMMAND ----------
 
-total = df_geo.count()
-invalids = df_geo.filter(~F.col("has_valid_coordinates")).count()
-no_region = df_geo.filter(F.col("region").isNull()).count()
+total    = df_geo.count()
+invalids = df_geo.filter(~F.col("is_valid")).count()
+sem_uf   = df_geo.filter(F.col("uf").isNull()).count()
+sem_data = df_geo.filter(F.col("day").isNull()).count()
 
-print(f"Total de linhas  : {total}")
-print(f"Sem coordenadas  : {invalids} ({invalids/total*100:.1f}%)")
-print(f"UF sem região    : {no_region} ({no_region/total*100:.1f}%)")
+print(f"Total de linhas   : {total:,}")
+print(f"qtd inválida      : {invalids:,}  ({invalids/total*100:.1f}%)")
+print(f"Sem UF detectada  : {sem_uf:,}   ({sem_uf/total*100:.1f}%)")
+print(f"Sem data          : {sem_data:,}  ({sem_data/total*100:.1f}%)")
 
-# Distribuição por região
-df_geo.groupBy("region").count().orderBy("count", ascending=False).display()
+print("\n— Distribuição por Região —")
+df_geo.groupBy("regiao").agg(
+    F.count("*").alias("registros"),
+    F.sum("qtd").alias("total_qtd")
+).orderBy("total_qtd", ascending=False).display()
 
 # COMMAND ----------
 
-# MAGIC %md ## 5. Gravar na Silver Delta Table
+# MAGIC %md ## 4. Gravar Silver
 
 # COMMAND ----------
 
 (
     df_geo.write
     .format("delta")
-    .mode("overwrite")          # Sobrescreve a Silver com o dado mais atual
+    .mode("overwrite")
     .option("overwriteSchema", "true")
     .saveAsTable(SILVER_TABLE)
 )
 
-print(f"Silver gravada: {SILVER_TABLE}")
-spark.sql(f"DESCRIBE DETAIL {SILVER_TABLE}").select("name","numFiles","sizeInBytes").display()
+print(f"Silver gravada: {SILVER_TABLE}  ({df_geo.count():,} linhas)")
