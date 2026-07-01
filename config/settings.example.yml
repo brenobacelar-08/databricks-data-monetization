@@ -1,0 +1,26 @@
+# Copie este arquivo para config/settings.yml e ajuste os valores.
+# settings.yml NÃO vai para o Git (.gitignore já inclui).
+
+databricks:
+  catalog: data_monetization
+  bronze_schema: bronze
+  silver_schema: silver
+  gold_schema: gold
+  raw_volume: raw_csv
+
+# Mapeamento das colunas do SEU CSV para os nomes lógicos usados nos notebooks.
+# Se a coluna "city" no seu CSV se chama "municipio", troque "city" por "municipio".
+csv_columns:
+  city: city
+  state: state           # UF de dois caracteres, ex: "SP"
+  latitude: latitude
+  longitude: longitude
+  date: event_date       # Coluna de data/timestamp (deixe vazio se não houver)
+  metric: value          # Coluna numérica principal de negócio (vendas, cliques, etc.)
+
+# BigQuery (preencha quando ativar o export)
+bigquery:
+  gcp_project: ""
+  bq_dataset: data_monetization
+  gcs_temp_bucket: ""
+  credentials_path: ""   # Caminho da chave JSON no Volume Databricks
