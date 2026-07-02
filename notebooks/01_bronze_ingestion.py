@@ -89,7 +89,8 @@ display(df_raw.limit(10))
 
 df_bronze = (
     df_raw
-    .withColumn("_source_file",  F.input_file_name())
+    # Unity Catalog exige _metadata.file_path em vez de input_file_name()
+    .withColumn("_source_file",  F.col("_metadata.file_path"))
     .withColumn("_ingested_at",  F.current_timestamp())
     .withColumn("_row_hash",
         F.md5(F.concat_ws("|", *[F.col(c).cast("string") for c in df_raw.columns]))
