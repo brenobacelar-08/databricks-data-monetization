@@ -119,11 +119,12 @@ QUERIES = [
 
 page_name = str(uuid.uuid4())
 datasets  = []
-layout    = []   # widgets vão DENTRO do layout (formato Lakeview exige spec no widget do layout)
+layout    = []
 
 for i, q in enumerate(QUERIES):
     ds_name     = str(uuid.uuid4())
     widget_name = str(uuid.uuid4())
+    query_ref   = str(uuid.uuid4())
 
     datasets.append({
         "name":        ds_name,
@@ -131,34 +132,52 @@ for i, q in enumerate(QUERIES):
         "query":       q["query"],
     })
 
+    x_col = q.get("x_col", "")
+    y_col = q.get("y_col", "")
+
     if q["widget_type"] == "bar":
+        # Lakeview exige que os campos sejam declarados no queries[].query.fields
+        fields = [
+            {"name": x_col, "expression": f"`{x_col}`"},
+            {"name": y_col, "expression": f"`{y_col}`"},
+        ]
         spec = {
             "version": 3,
             "widgetType": "bar",
             "encodings": {
-                "x": {"fieldName": q.get("x_col",""), "scale": {"type": "categorical"}},
-                "y": [{"fieldName": q.get("y_col",""), "scale": {"type": "quantitative"}, "displayName": q.get("y_col","")}],
+                "x": {"fieldName": x_col, "scale": {"type": "categorical"}},
+                "y": [{"fieldName": y_col, "scale": {"type": "quantitative"}, "displayName": y_col}],
             },
             "frame": {"showTitle": True, "title": q["name"]},
         }
+        disaggregated = False
     else:
+        fields        = []          # vazio = todas as colunas
+        disaggregated = True        # tabela retorna linhas individuais
         spec = {
-            "version": 3,
+            "version":    3,
             "widgetType": "table",
-            "frame": {"showTitle": True, "title": q["name"]},
+            "frame":      {"showTitle": True, "title": q["name"]},
         }
 
     col = (i % 2) * 6
     row = (i // 2) * 7
 
-    # spec fica DENTRO do widget que está DENTRO do layout
     layout.append({
         "widget": {
             "name":        widget_name,
             "title":       q["name"],
             "description": q.get("description", ""),
-            "dataset":     ds_name,
-            "spec":        spec,        # <-- aqui é o local correto
+            # queries vincula o widget ao dataset (obrigatório no Lakeview)
+            "queries": [{
+                "name":  query_ref,
+                "query": {
+                    "datasetName":   ds_name,
+                    "fields":        fields,
+                    "disaggregated": disaggregated,
+                },
+            }],
+            "spec": spec,
         },
         "position": {"x": col, "y": row, "width": 6, "height": 6},
     })
@@ -167,7 +186,7 @@ serialized = json.dumps({
     "pages": [{
         "name":        page_name,
         "displayName": "Mobilidade",
-        "layout":      layout,         # sem chave "widgets" separada
+        "layout":      layout,
     }],
     "datasets": datasets,
 })
@@ -177,7 +196,17 @@ print(f"Widgets   : {len(widgets)}")
 
 # COMMAND ----------
 
-# MAGIC %md ## 3. Criar o dashboard via Lakeview API
+# MAGIC %md ## 3. Apagar dashboard anterior (se existir) e recriar
+
+# COMMAND ----------
+
+# Lista dashboards existentes e apaga o que tem o mesmo nome
+list_r = requests.get(f"{HOST}/api/2.0/lakeview/dashboards", headers=HEADERS)
+for d in list_r.json().get("dashboards", []):
+    if d.get("display_name") == "Mobilidade — Audiência & Expansão de Lojas":
+        did = d.get("dashboard_id") or d.get("id")
+        requests.delete(f"{HOST}/api/2.0/lakeview/dashboards/{did}", headers=HEADERS)
+        print(f"Dashboard anterior removido: {did}")
 
 # COMMAND ----------
 
