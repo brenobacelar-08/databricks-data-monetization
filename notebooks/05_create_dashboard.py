@@ -119,21 +119,18 @@ QUERIES = [
 
 page_name = str(uuid.uuid4())
 datasets  = []
-widgets   = []
-layout    = []
+layout    = []   # widgets vão DENTRO do layout (formato Lakeview exige spec no widget do layout)
 
 for i, q in enumerate(QUERIES):
     ds_name     = str(uuid.uuid4())
     widget_name = str(uuid.uuid4())
 
-    # Dataset: SQL direto (Lakeview não usa query IDs — embute o SQL)
     datasets.append({
         "name":        ds_name,
         "displayName": q["name"],
         "query":       q["query"],
     })
 
-    # Spec do widget
     if q["widget_type"] == "bar":
         spec = {
             "version": 3,
@@ -151,19 +148,18 @@ for i, q in enumerate(QUERIES):
             "frame": {"showTitle": True, "title": q["name"]},
         }
 
-    widgets.append({
-        "name":        widget_name,
-        "title":       q["name"],
-        "description": q.get("description",""),
-        "dataset":     ds_name,
-        "spec":        spec,
-    })
+    col = (i % 2) * 6
+    row = (i // 2) * 7
 
-    # Posição: 2 colunas, cada widget ocupa metade da largura
-    col  = (i % 2) * 6
-    row  = (i // 2) * 7
+    # spec fica DENTRO do widget que está DENTRO do layout
     layout.append({
-        "widget":   {"name": widget_name},
+        "widget": {
+            "name":        widget_name,
+            "title":       q["name"],
+            "description": q.get("description", ""),
+            "dataset":     ds_name,
+            "spec":        spec,        # <-- aqui é o local correto
+        },
         "position": {"x": col, "y": row, "width": 6, "height": 6},
     })
 
@@ -171,8 +167,7 @@ serialized = json.dumps({
     "pages": [{
         "name":        page_name,
         "displayName": "Mobilidade",
-        "layout":      layout,
-        "widgets":     widgets,
+        "layout":      layout,         # sem chave "widgets" separada
     }],
     "datasets": datasets,
 })
