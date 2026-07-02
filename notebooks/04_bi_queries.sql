@@ -83,16 +83,24 @@ ORDER BY tipo, total_visitas DESC;
 -- Visualização: Tabela com destaque
 -- Insight: qual persona caracteriza cada território — base para segmentação
 -- ----------------------------------------------------------------------------
-SELECT
-    nm_dist                               AS municipio,
-    uf,
-    personas,
-    SUM(qtd)                              AS total_visitas,
-    ROUND(AVG(permanencia_minutos), 1)    AS permanencia_media_min
-FROM fct_mobilidade
-WHERE personas IS NOT NULL AND nm_dist IS NOT NULL
-GROUP BY nm_dist, uf, personas
-QUALIFY ROW_NUMBER() OVER (PARTITION BY nm_dist ORDER BY SUM(qtd) DESC) = 1
+WITH personas_ranked AS (
+    SELECT
+        nm_dist                               AS municipio,
+        uf,
+        personas,
+        SUM(qtd)                              AS total_visitas,
+        ROUND(AVG(permanencia_minutos), 1)    AS permanencia_media_min,
+        ROW_NUMBER() OVER (
+            PARTITION BY nm_dist
+            ORDER BY SUM(qtd) DESC
+        )                                     AS rn
+    FROM fct_mobilidade
+    WHERE personas IS NOT NULL AND nm_dist IS NOT NULL
+    GROUP BY nm_dist, uf, personas
+)
+SELECT municipio, uf, personas, total_visitas, permanencia_media_min
+FROM personas_ranked
+WHERE rn = 1
 ORDER BY total_visitas DESC
 LIMIT 20;
 
