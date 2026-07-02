@@ -136,28 +136,27 @@ for i, q in enumerate(QUERIES):
     y_col = q.get("y_col", "")
 
     if q["widget_type"] == "bar":
-        # Lakeview exige que os campos sejam declarados no queries[].query.fields
-        fields = [
-            {"name": x_col, "expression": f"`{x_col}`"},
-            {"name": y_col, "expression": f"`{y_col}`"},
-        ]
+        query_name = "main_query"   # nome fixo — referenciado em spec.data.queryName
         spec = {
-            "version": 3,
+            "version":    3,
             "widgetType": "bar",
-            "encodings": {
-                "x": {"fieldName": x_col, "scale": {"type": "categorical"}},
-                "y": [{"fieldName": y_col, "scale": {"type": "quantitative"}, "displayName": y_col}],
+            "frame":      {"showTitle": True, "title": q["name"]},
+            # data.queryName é o vínculo entre spec e o dataset — campo obrigatório
+            "data":       {"queryName": query_name},
+            "encodings":  {
+                "x": {"fieldName": x_col},
+                "y": [{"fieldName": y_col}],
             },
-            "frame": {"showTitle": True, "title": q["name"]},
         }
         disaggregated = False
     else:
-        fields        = []          # vazio = todas as colunas
-        disaggregated = True        # tabela retorna linhas individuais
+        query_name    = str(uuid.uuid4())
+        disaggregated = True
         spec = {
             "version":    3,
             "widgetType": "table",
             "frame":      {"showTitle": True, "title": q["name"]},
+            # tabelas não precisam de data/encodings
         }
 
     col = (i % 2) * 6
@@ -165,15 +164,12 @@ for i, q in enumerate(QUERIES):
 
     layout.append({
         "widget": {
-            "name":        widget_name,
-            "title":       q["name"],
-            "description": q.get("description", ""),
-            # queries vincula o widget ao dataset (obrigatório no Lakeview)
+            "name": widget_name,
+            # queries: sem fields — só datasetName + disaggregated
             "queries": [{
-                "name":  query_ref,
+                "name":  query_name,
                 "query": {
                     "datasetName":   ds_name,
-                    "fields":        fields,
                     "disaggregated": disaggregated,
                 },
             }],
