@@ -27,6 +27,9 @@ print(f"Destino: {SILVER_TABLE}")
 from pyspark.sql import functions as F
 from pyspark.sql.types import DateType
 
+# Desativa ANSI strict para que datas/valores inválidos virem null em vez de erro
+spark.conf.set("spark.sql.ansi.enabled", "false")
+
 df = spark.table(BRONZE_TABLE)
 print(f"Linhas na Bronze: {df.count():,}")
 
@@ -39,8 +42,8 @@ print(f"Linhas na Bronze: {df.count():,}")
 df_clean = (
     df
     .dropDuplicates(["_row_hash"])
-    # Data: converte string para DateType (aceita formatos YYYY-MM-DD e YYYYMMDD)
-    .withColumn("day", F.to_date(F.col("day")))
+    # Data: try_to_date não quebra em valores malformados (retorna null ao invés de erro)
+    .withColumn("day", F.to_date(F.col("day"), "yyyy-MM-dd"))
     # Strings: trim em todos os campos categóricos
     .withColumn("nm_dist",      F.trim(F.col("nm_dist")))
     .withColumn("tipo",         F.trim(F.upper(F.col("tipo"))))

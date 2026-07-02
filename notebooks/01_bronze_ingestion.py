@@ -11,7 +11,7 @@
 
 dbutils.widgets.text("catalog",    "data_monetization", "Catalog")
 dbutils.widgets.text("table_name", "mobilidade_raw",    "Tabela Bronze")
-dbutils.widgets.text("separator",  "\t",                "Separador (TAB=\\t  vírgula=,  ponto-e-vírgula=;)")
+dbutils.widgets.text("separator",  ";",                 "Separador (ponto-e-vírgula=;  vírgula=,  TAB=\\t)")
 
 CATALOG    = dbutils.widgets.get("catalog")
 TABLE_NAME = dbutils.widgets.get("table_name")
